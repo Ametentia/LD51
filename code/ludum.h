@@ -1,6 +1,7 @@
 #if !defined(LUDUM_H_)
 #define LUDUM_H_
 
+//#define LUDAM_INTERNAL 1
 #include <base.h>
 
 enum Game_Mode : u32 {

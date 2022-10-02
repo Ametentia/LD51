@@ -1,5 +1,6 @@
 #include <base.cpp>
 
+#include "ludum_util.cpp"
 #include "ludum_mode_play.cpp"
 
 function void LudumInit(Game_State *state, Texture_Transfer_Queue *texture_queue) {
