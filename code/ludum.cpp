@@ -14,6 +14,10 @@ function void LudumInit(Game_State *state, Texture_Transfer_Queue *texture_queue
 }
 
 function void LudumUpdateRender(Game_State *state, Input *input, Renderer_Buffer *rbuffer) {
+    if (input->delta_time > (1.0f / 60.0f)) {
+        input->delta_time = 1.0f / 60.0f;
+    }
+
     switch (state->mode) {
         case GameMode_Play: {
             LudumModePlayUpdateRender(state->play, input, rbuffer);

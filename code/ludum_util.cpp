@@ -22,3 +22,11 @@ function v2 GetScaledImageDim(Amt_Image *image) {
 
     return result;
 }
+
+function rect2 GetBoundingBox(v2 p, v2 dim) {
+    rect2 result;
+    result.min = p - (0.5f * dim);
+    result.max = p + (0.5f * dim);
+
+    return result;
+}
