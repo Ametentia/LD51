@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
     // Main game state init
     //
     Memory_Allocator *alloc = Platform->GetMemoryAllocator();
-    Game_State *state = AllocInline(alloc, Megabytes(128), Game_State, perm);
+    Game_State *state = AllocInline(alloc, Gigabytes(1), Game_State, perm);
 
     LudumInit(state, &renderer->texture_queue);
 
@@ -64,12 +64,14 @@ int main(int argc, char **argv) {
 
         renderer->SubmitFrame(renderer);
 
+        if (input->requested_quit) { running = false; }
+
         //Game_State *state = context->state;
 
-        //Audio_Buffer audio_buffer = {};
-        //WindowsGetAudioBuffer(&audio_buffer);
-        // MixPlayingSounds(&state->audio_state, &state->assets,  &audio_buffer);
-        //WindowsSubmitAudioBuffer(&audio_buffer);
+        Audio_Buffer audio_buffer = {};
+        WindowsGetAudioBuffer(&audio_buffer);
+        MixPlayingSounds(&state->audio, &state->assets,  &audio_buffer);
+        WindowsSubmitAudioBuffer(&audio_buffer);
     }
 
     renderer->Shutdown(renderer);

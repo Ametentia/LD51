@@ -1,3 +1,5 @@
+#define SQUARE(x) ((x) * (x))
+
 function b32 IsFinished(Sprite_Animation *animation) {
     b32 result = (animation->current_frame == (animation->total_frames - 1));
     return result;
@@ -27,6 +29,24 @@ function rect2 GetBoundingBox(v2 p, v2 dim) {
     rect2 result;
     result.min = p - (0.5f * dim);
     result.max = p + (0.5f * dim);
+
+    return result;
+}
+
+function v2 GetAnimationDim(Sprite_Animation *animation, Amt_Image *info) {
+    v2 result;
+
+    result.x = info->width  / cast(f32) animation->cols;
+    result.y = info->height / cast(f32) animation->rows;
+
+    if (result.x > result.y) {
+        result.y = result.y / result.x;
+        result.x = 1.0f;
+    }
+    else {
+        result.x = result.x / result.y;
+        result.y = 1.0f;
+    }
 
     return result;
 }

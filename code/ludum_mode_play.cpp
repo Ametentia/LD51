@@ -1,3 +1,5 @@
+
+
 enum Layers {
     Layer_Foreground0 = 6,
     Layer_Foreground1 = 4,
@@ -70,21 +72,39 @@ struct Dust_Particle {
 
 enum Env_Object_Flags {
     EnvObjectFlag_Platform   = (1 << 0),
-    EnvObjectFlag_Foreground = (1 << 1)
+    EnvObjectFlag_Foreground = (1 << 1),
+    EnvObjectFlag_Terrain    = (1 << 2),
+    EnvObjectFlag_Animated   = (1 << 3)
+};
+
+enum Env_Terrain_Sides {
+    EnvTerrainSide_Left   = (1 << 0),
+    EnvTerrainSide_Right  = (1 << 1),
+    EnvTerrainSide_Top    = (1 << 2),
+    EnvTerrainSide_Bottom = (1 << 3),
+
+    EnvTerrainSide_All = (EnvTerrainSide_Left | EnvTerrainSide_Right | EnvTerrainSide_Top | EnvTerrainSide_Bottom)
 };
 
 struct Env_Object {
-    Image_Handle image;
+    b32 valid;
+
+    u32 type; // kizobject type
+    Sprite_Animation animation;
 
     u32 flags;
 
+    u32 sides;
+    u64 terrain_seed;
+
     v2 p;
-    f32 scale;
+    v2 scale;
 };
 
 enum Editor_Mode {
     EditorMode_Select,
     EditorMode_Place,
+    EditorMode_DrawTerrain
 };
 
 #define MAX_LAYER_OBJECTS 64
@@ -98,30 +118,42 @@ struct Layer {
 
     u32 num_dust;
     Dust_Particle dust[MAX_LAYER_OBJECTS];
-
-    // @Todo: add platforms etc.
 };
 
 #define MAX_LEVEL_LAYERS 8
 
 struct Level {
+    rect2 camera_r;
+
     u32 front_layer;
     u32 back_layer;
     Layer layers[MAX_LEVEL_LAYERS];
+
+    v2 player_start_p;
 };
 
 struct Editor {
     b32 enabled;
+
+    v2 camera_p;
+    f32 zoom;
 
     u32 mode;
 
     s32 type;
 
     f32 scale;
+
     s32 layer;
+    s32 sub_layer;
+
+    rect2 level_rect;
 
     Level *level;
     Env_Object *selected;
+
+    Env_Object *last_terrain;
+    v2 terrain_begin;
 };
 
 struct Mode_Play {
@@ -131,6 +163,10 @@ struct Mode_Play {
     Draw_Batch *batch;
 
     Player player;
+
+    Playing_Sound *music;
+
+    f32 level_timer;
 
     b32 active;
     f32 yaw;
@@ -145,52 +181,62 @@ struct Mode_Play {
     v2 camera_p;
     v2 camera_dp;
 
-    Level  level;
+    u32 level_count;
+    Level *level;
+    Level *levels;
     Editor editor;
 
     u32 num_moves;
     u32 next_move;
     v2 movement_trail[256];
 
+    // Pre-cached handles to the images for the objects
+    //
+    Image_Handle images[KizObject_count];
+
     Random rnd;
 };
 
 function void SimEditor(Mode_Play *play, Input *input);
 
-#define SQUARE(x) ((x) * (x))
-
 #define CAMERA_STIFFNESS 430
 #define CAMERA_DAMPING   70
 
-#define DASH_OFFSET 1.3
+#define DASH_OFFSET 0
 #define PLAYER_PRE_DASH_TIME (0.1f)
 #define PLAYER_POST_DASH_TIME (0.6f)
 #define PLAYER_DASH_TIME (0.2f)
 #define PLAYER_TOTAL_DASH_TIME (PLAYER_PRE_DASH_TIME + PLAYER_DASH_TIME)
 
-#define PLAYER_DASH_SPEED (550.3f)
+#define PLAYER_DASH_END_TIME 0.15f
 
-#define PLAYER_MAX_JUMP_HEIGHT (1.68f)
-#define PLAYER_MIN_JUMP_HEIGHT (0.9f)
+#define DASH_TIME (0.34)
+#define PLAYER_DASH_SPEED (15.3f)
+
+#define PLAYER_MAX_JUMP_HEIGHT (2.68f)
+#define PLAYER_MIN_JUMP_HEIGHT (1.33f)
 
 #define PLAYER_MAX_DASH_DIST (3.43f)
 
 #define PLAYER_DASH_STRAFE_SPEED (20.0f)
 
-#define PLAYER_DASH_APEX_TIME  (0.8f)
-#define PLAYER_JUMP_APEX_TIME   (0.4f)
+#define PLAYER_DASH_APEX_HEIGHT (1.02f)
+#define PLAYER_DASH_APEX_TIME   (0.15f)
+
+#define PLAYER_JUMP_APEX_TIME   (0.5f)
 
 #define PLAYER_JUMP_BUFFER_TIME (0.2f)
 #define PLAYER_COYOTE_TIME      (0.2f)
 
 #define PLAYER_DAMPING (44.5f)
 #define PLAYER_DAMPING_AIR (3.1f)
-#define PLAYER_DASH_DAMPING (3.0f)
 
-#define PLAYER_MAX_SPEED_X (4.8f)
+#define PLAYER_DASH_DAMPING (2.7f)
+
+#define PLAYER_MAX_SPEED_X (6.8f)
 #define PLAYER_MAX_SPEED_Y (7.2f)
 
-#define PLAYER_MOVE_SPEED       (10.0f)
+#define PLAYER_MOVE_SPEED       (18.0f)
 #define PLAYER_AIR_STRAFE_SPEED (4.0f)
 
 function b32 IsDash(u32 slot) {
@@ -244,6 +290,11 @@ function f32 GetDashAngle(Input *input) {
     return result;
 }
 
+function Image_Handle GetObjectImage(Mode_Play *play, u32 type) {
+    Image_Handle result = play->images[type];
+    return result;
+}
+
 function void ModePlay(Game_State *state) {
     Reset(&state->mode_arena);
 
@@ -264,9 +315,9 @@ function void ModePlay(Game_State *state) {
 
         Image_Handle post_dash_sheet = GetImageByName(&state->assets, "post_dash");
 
-        Initialise(&player->animations[AnimationSlot_Idle],    idle_sheet,     3, 3, 8, 1.0f / 30.0f);
-        Initialise(&player->animations[AnimationSlot_Walk],    walk_sheet,     3, 3, 8, 1.0f / 30.0f);
-        Initialise(&player->animations[AnimationSlot_Jump],    jump_sheet,     2, 3,    1.0f / 30.0f);
+        Initialise(&player->animations[AnimationSlot_Idle],    idle_sheet,     22, 1, 8, 1.0f / 15.0f);
+        Initialise(&player->animations[AnimationSlot_Walk],    walk_sheet,      3, 3, 8, 1.0f / 30.0f);
+        Initialise(&player->animations[AnimationSlot_Jump],    jump_sheet,      2, 3,    1.0f / 30.0f);
 
         Initialise(&player->animations[AnimationSlot_PreDash],  pre_dash_sheet,  1, 17,    1.0f / 30.0f);
         Initialise(&player->animations[AnimationSlot_Dash],     dash_sheet,      4, 1,     1.0f / 30.0f);
@@ -279,16 +330,60 @@ function void ModePlay(Game_State *state) {
 
         player->slot   = AnimationSlot_Idle;
         player->facing = 1;
+        player->animation_scale = V2(1, 1);
 
         play->shake_offset = V2(0.1, 0.1);
         play->shake_angle  = 0; // @Todo: I don't know if this look better Pi32 / 256.0f;
 
         play->rnd = RandomSeed(3920483094823);
 
+
+        for (u32 i = 0; i < KizObject_count; ++i) {
+            play->images[i] = GetImageByName(&state->assets, kiz_object_names[i]);
+        }
+
+        Scratch_Memory scratch = GetScratch();
+        Memory_Arena *temp = scratch.arena;
+
+        str8 working = Platform->GetPath(PlatformPath_Executable);
+        str8 level_dir = FormatStr(temp, "%.*s/data/levels", str8_unpack(working));
+
+        Path_List list = Platform->ListPath(temp, level_dir);
+
+        printf("There are %d levels\n", list.entry_count);
+
+#if 0
+        play->level_count = list.entry_count + 1;
+        play->levels = AllocArray(play->arena, Level, play->level_count);
+
+        Path_Entry *e = list.first;
+        for (u32 i = 1; i < play->level_count; ++i) {
+            str8 path = FormatStr(temp, "levels/%.*s", str8_unpack(e->basename));
+            ReadKiz(path, &play->levels[i], play);
+
+            e = e->next;
+            if (!e) { break; }
+        }
+
+        play->level = &play->levels[1];
+        play->level_timer = 10;
+#endif
+        play->level_count = 1;
+        play->levels = AllocArray(play->arena, Level, play->level_count);
+
+        play->level = &play->levels[0];
+
+        play->editor.enabled = true;
         play->editor.mode  = EditorMode_Place;
         play->editor.scale = 1;
         play->editor.layer = 0;
-        play->editor.level = &play->level;
+        play->editor.level = &play->levels[0];
+        play->editor.zoom  = 24;
+        play->editor.layer = -2; // start on player layer
+        play->editor.sub_layer = 32;
+
+        Sound_Handle music = GetSoundByName(&state->assets, "bgm_short");
+        //play->music = PlaySound(&state->audio, music, PlayingSound_Looped, V2(0.60, 0.60));
 
         // We don't have to zero init anything because it is cleared by AllocType
         //
@@ -359,7 +454,41 @@ function void UpdateDebugCamera(Mode_Play *play, Input *input, Draw_Batch *batch
                 normal_bounds.max.xy - normal_bounds.min.xy, 0, V4(0, 1, 0, 1));
 }
 
+#if 0
+function void DashPlayer(Player *player, Input *input) {
+    f32 dt = input->delta_time;
+
+    player->dash_timer -= dt;
+    f32 time_elapsed = DASH_TIME - player->dash_timer;
+
+    f32 gravity = (2 * PLAYER_MAX_JUMP_HEIGHT) / (PLAYER_JUMP_APEX_TIME * PLAYER_JUMP_APEX_TIME);
+    v2 ddp = V2(0, gravity);
+
+    if (time_elapsed <= 0.15f) {
+        player->dp =
+    }
+    else {
+        player->dp.x *= (1.0f / (1 + PLAYER_DASH_DAMPING * dt));
+        player->dp.y *= (1.0f / (1 + PLAYER_DASH_DAMPING * dt));
+
+        // Move left right
+        //
+        if      (IsPressed(input->keys[Key_A])) { ddp.x = -PLAYER_MOVE_SPEED; }
+        else if (IsPressed(input->keys[Key_D])) { ddp.x =  PLAYER_MOVE_SPEED; }
+
+        printf("damping dash speed\n");
+    }
+
+    // Apply acceleration and update position
+    //
+    player->p  += (player->dp * dt);
+    player->dp += (ddp * dt);
+}
+#endif
+
 function void UpdatePlayer(Mode_Play *play, Input *input) {
+    Game_State *state = play->state;
+
     Player *player = &play->player;
 
     f32 dt   = input->delta_time;
@@ -395,6 +524,7 @@ function void UpdatePlayer(Mode_Play *play, Input *input) {
                 player->slot = AnimationSlot_Dash;
                 player->animation_scale = V2(4, 4);
 
+                player->can_dash   = false;
                 player->dash_timer = 0;
 
                 play->shake = 0.9;
@@ -439,12 +569,31 @@ function void UpdatePlayer(Mode_Play *play, Input *input) {
                     player->slot = AnimationSlot_Fall;
                 }
 
-                ddp.x = player->on_ground ? -PLAYER_MOVE_SPEED : -PLAYER_AIR_STRAFE_SPEED;
+                //ddp.x = player->facing * PLAYER_MOVE_SPEED;
+
+
+                ddp = player->dash_dir * PLAYER_MOVE_SPEED;
 
                 printf("----------- END DASH -------\n\n");
             }
+
+            if (!IsPressed(input->keys[Key_A]) && !IsPressed(input->keys[Key_D])) {
+            }
         }
         break;
+#if 0
+        case AnimationSlot_Walk: {
+            Sound_Handle handles[] = {
+                GetSoundByName(&state->assets, "footstep_00"),
+                GetSoundByName(&state->assets, "footstep_01"),
+                GetSoundByName(&state->assets, "footstep_02"),
+                GetSoundByName(&state->assets, "footstep_03")
+            };
+
+            PlaySound(&state->audio, handles[1]);
+        }
+        break;
+#endif
     }
 
     player->dash_timer += dt;
@@ -511,9 +660,14 @@ function void UpdatePlayer(Mode_Play *play, Input *input) {
         UpdateAnimation(&player->animations[player->slot], dt);
     }
 
-#define MAX_DASH_SPEED 45
-    if (player->dash_timer < 0.13) {
+#define MAX_DASH_SPEED 32
+    if (player->dash_timer < 0.15) {
         player->dp = player->dash_dir * MAX_DASH_SPEED;
+    }
+    else if (player->dash_timer < 0.7) {
+        if (IsZero(ddp.x)) {
+            player->dp.x *= (1.0f / (1 + (PLAYER_DASH_DAMPING * dt)));
+        }
     }
 
     player->p  += (player->dp * dt);
@@ -532,6 +686,8 @@ function void UpdatePlayer(Mode_Play *play, Input *input) {
             player->dash_dir   = Noz(player->dash_dir);
             player->dash_angle = GetDashAngle(input);
         }
+
+        player->can_dash = false;
 
         player->animation_scale = V2(1.27, 1.27);
         player->slot = AnimationSlot_PreDash;
@@ -555,12 +711,9 @@ function void UpdatePlayer(Mode_Play *play, Input *input) {
     if (Abs(player->dp.x) > PLAYER_MAX_SPEED_X) { player->dp.x *= (PLAYER_MAX_SPEED_X / Abs(player->dp.x)); }
     if (Abs(player->dp.x) > PLAYER_MAX_SPEED_Y) { player->dp.y *= (PLAYER_MAX_SPEED_Y / Abs(player->dp.y)); }
 
-    if (player->p.y > 4.98) {
-        player->p.y  = 4.98;
+    if (player->p.y > 50) {
+        player->p.y  = 0;
         player->dp.y = 0;
-
-        player->on_ground = true;
-        player->can_dash  = true;
     }
 
     play->movement_trail[play->next_move] = player->p;
@@ -609,7 +762,7 @@ function void LevelUpdate(Mode_Play *play, Level *level, f32 dt) {
     Random *rng = &play->rnd;
 
     u32 v = RandomU32(rng, 0, 50);
-    if (v > 20) { SpawnDust(play, &play->level, rng, 1); }
+    if (v > 20) { SpawnDust(play, play->level, rng, 1); }
 
     for (s32 i = level->back_layer; i > 0; --i) {
         Layer *layer = &level->layers[i];
@@ -632,16 +785,27 @@ function void LevelUpdate(Mode_Play *play, Level *level, f32 dt) {
 
     rect2 player_box = GetBoundingBox(player->p, player->dim);
 
-    for (u32 i = 0; i < layer->num_objects; ++i) {
+    for (u32 i = 0; i < MAX_LAYER_OBJECTS; ++i) {
         Env_Object *obj = &layer->objects[i];
+        if (!obj->valid) { continue; }
+
+        if (obj->flags & EnvObjectFlag_Animated) {
+            UpdateAnimation(&obj->animation, dt);
+        }
 
         if (obj->flags & EnvObjectFlag_Platform) {
-            Amt_Image *info = GetImageInfo(&play->state->assets, obj->image);
+            v2 dim;
+            if (obj->flags & EnvObjectFlag_Terrain) {
+                dim = obj->scale;
+            }
+            else {
+                Amt_Image *info = GetImageInfo(&play->state->assets, GetObjectImage(play, obj->type));
+                dim = obj->scale.x * GetScaledImageDim(info);
+            }
 
-            v2 dim = obj->scale * GetScaledImageDim(info);
             rect2 platform = GetBoundingBox(obj->p, dim);
 
-            //DrawQuadOutline(play->batch, V3(obj->p, layer->z_value), dim, 0, V4(0, 1, 1, 1), 0.03);
+            DrawQuadOutline(play->batch, V3(obj->p, layer->z_value), dim, 0, V4(0, 1, 1, 1), 0.03);
 
             v2 overlap;
             overlap.x = Min(player_box.max.x, platform.max.x) - Max(player_box.min.x, platform.min.x);
@@ -677,7 +841,204 @@ function void LevelUpdate(Mode_Play *play, Level *level, f32 dt) {
                 player_box.max = player->p + (0.5f * player->dim);
             }
         }
+        else if (obj->type == KizObject_orb) {
+            //Amt_Image *info = GetImageInfo(&play->state->assets, obj->image);
+            v2 dim = V2(obj->scale.x, obj->scale.x);
+
+            rect2 orb = GetBoundingBox(obj->p, dim);
+
+            //DrawQuadOutline(play->batch, V3(obj->p, layer->z_value), dim, 0, V4(1, 0, 1, 1), 0.03);
+
+            v2 overlap;
+            overlap.x = Min(player_box.max.x, orb.max.x) - Max(player_box.min.x, orb.min.x);
+            overlap.y = Min(player_box.max.y, orb.max.y) - Max(player_box.min.y, orb.min.y);
+
+            // We collided
+            //
+            if (overlap.x > 0 && overlap.y > 0) {
+                player->can_dash = true;
+            }
+        }
+        else if (obj->type == KizObject_goal) {
+            v2 dim = V2(obj->scale.x, obj->scale.x);
+
+            rect2 orb = GetBoundingBox(obj->p, dim);
+
+            DrawQuadOutline(play->batch, V3(obj->p, layer->z_value), dim, 0, V4(1, 0, 1, 1), 0.03);
+
+            v2 overlap;
+            overlap.x = Min(player_box.max.x, orb.max.x) - Max(player_box.min.x, orb.min.x);
+            overlap.y = Min(player_box.max.y, orb.max.y) - Max(player_box.min.y, orb.min.y);
+
+            // We collided
+            //
+            if (overlap.x > 0 && overlap.y > 0) {
+                printf("WE WON THE LEVEL!!!!!!!!!!!!!!!!!!\n");
+            }
+        }
     }
+}
+
+function void DrawTerrain(Mode_Play *play, Draw_Batch *batch, Env_Object *terrain, f32 z) {
+    v4 floor_c = V4(SQUARE(7/255.0f), SQUARE(24/255.0f), SQUARE(22/255.0f), 1.0);
+
+    DrawQuad(batch, { 0 }, V3(terrain->p, z), terrain->scale, 0, floor_c);
+
+    Random rng = RandomSeed(terrain->terrain_seed);
+
+    rect2 bounds = GetBoundingBox(terrain->p, terrain->scale);
+
+    Asset_Manager *assets = &play->state->assets;
+    v2 p;
+
+    Image_Handle image = GetImageByName(assets, "canopy");
+    v2 dim = 10 * GetScaledImageDim(GetImageInfo(assets, image));
+
+    // Bottom edge
+    //
+    if (terrain->sides & EnvTerrainSide_Bottom) {
+        p.x = bounds.max.x - 0.5f * dim.x;
+        p.y = bounds.max.y - 0.2f * dim.y;
+        while (p.x > bounds.min.x) {
+            p.x += 0.2 * RandomBilateral(&rng);
+
+            if (p.x < bounds.min.x) { break; }
+
+            if (p.x - 0.5f * dim.x < bounds.min.x) {
+                p.x = bounds.min.x + 0.5f * dim.x;
+            }
+
+            DrawQuad(batch, image, V3(p.x, p.y + 0.5f * dim.y, z), dim, 0);
+            p.x -= 0.5f * dim.x;
+        }
+
+#if 0
+        v2 size = (bounds.max - bounds.min);
+        v2 c    = 0.5f * (bounds.max + bounds.min);
+        DrawQuad(batch, { 0 }, V3(c.x, c.y + 0.25f * size.y, z), V2(0.95f * size.x, 0.75f * size.y), 0, V4(0, 0, 0, 1));
+#endif
+    }
+
+    Image_Handle stones[] = {
+        GetImageByName(assets, "stones_01"),
+        GetImageByName(assets, "stones_02"),
+        GetImageByName(assets, "stones_03"),
+        GetImageByName(assets, "stones_04")
+    };
+
+    image = stones[RandomU32(&rng, 0, ArraySize(stones))];
+    dim = 2 * GetScaledImageDim(GetImageInfo(assets, image));
+
+    // Top edge
+    //
+    if (terrain->sides & EnvTerrainSide_Top) {
+        p.x = bounds.min.x + 0.5f * dim.x;
+        p.y = bounds.min.y;
+
+        while (p.x < bounds.max.x) {
+            p.x += 0.2 * RandomBilateral(&rng);
+
+            if (p.x > bounds.max.x) { break; }
+
+            if (p.x + 0.5f * dim.x > bounds.max.x) { p.x = bounds.max.x - 0.5f * dim.x; }
+
+            DrawQuad(batch, image, V3(p.x, p.y + 0.5f * dim.y, z), dim);
+            p.x += 0.5f * dim.x;
+
+            image = stones[RandomU32(&rng, 0, ArraySize(stones))];
+            dim   = 2 * GetScaledImageDim(GetImageInfo(assets, image));
+        }
+    }
+
+    Image_Handle bushes[] = {
+        GetImageByName(assets, "bush_blue"),
+        GetImageByName(assets, "bush_green"),
+        GetImageByName(assets, "bush_red"),
+        GetImageByName(assets, "bush_small_blue"),
+        GetImageByName(assets, "bush_small_green"),
+        GetImageByName(assets, "bush_small_red")
+    };
+
+    // Right edge
+    //
+    u32 bush = RandomU32(&rng, 0, ArraySize(bushes));
+
+    f32 scale = bush <= 2 ? 3 : 1;
+    f32 angle = bush >= 3 ? (360 * RandomUnilateral(&rng)) : 90;
+
+    image = bushes[bush];
+    dim   = scale * GetScaledImageDim(GetImageInfo(assets, image));
+
+    if (terrain->sides & EnvTerrainSide_Right) {
+        p.x = bounds.max.x + 0.2f * dim.y;
+        p.y = bounds.min.y + 0.5f * dim.x; // x because rotated 90 degrees
+        while (p.y < bounds.max.y) {
+            p.y += 0.2 * RandomBilateral(&rng);
+
+            if (p.y > bounds.max.y) { break; }
+
+            DrawQuad(batch, image, V3(p.x - 0.5f * dim.y, p.y, z),
+                    Sign(RandomBilateral(&rng)) * dim, Radians(angle));
+
+            p.y += 0.5f * dim.x;
+
+            bush = RandomU32(&rng, 0, ArraySize(bushes));
+
+            scale = bush <= 2 ? 3 : 1;
+            angle = bush >= 3 ? (360 * RandomUnilateral(&rng)) : 90;
+
+            image = bushes[bush];
+            dim   = scale * GetScaledImageDim(GetImageInfo(assets, image));
+
+            p.x = bounds.max.x + (0.2f * RandomUnilateral(&rng)) * dim.y;
+        }
+    }
+
+    // Left edge
+    //
+    bush  = RandomU32(&rng, 0, ArraySize(bushes));
+    image = bushes[bush];
+
+    scale = (bush <= 2) ? 3 : 1;
+    angle = (bush >= 3) ? (360 * RandomUnilateral(&rng)) : 90;
+
+    dim = scale * GetScaledImageDim(GetImageInfo(assets, image));
+
+    if (terrain->sides & EnvTerrainSide_Left) {
+        p.y = bounds.max.y - 0.5f * dim.x;
+        p.x = bounds.min.x;
+        while (p.y > bounds.min.y) {
+            p.y -= 0.2 * RandomBilateral(&rng);
+
+            if (p.y < bounds.min.y) { break; }
+
+            DrawQuad(batch, image, V3(p.x, p.y, z), dim, Radians(angle));
+            p.y -= 0.5f * dim.x;
+
+            bush  = RandomU32(&rng, 0, ArraySize(bushes));
+            image = bushes[bush];
+
+            scale = ((bush <= 2) ? 3 : 1);
+            angle = bush >= 3 ? (360 * RandomUnilateral(&rng)) : 90;
+
+            dim = scale * GetScaledImageDim(GetImageInfo(assets, image));
+        }
+    }
+
+    v2 center = 0.5f * (bounds.min + bounds.max);
+
+    v2 noz_c = Noz(-center);
+    v2 dir;
+    if (Abs(noz_c.x) > Abs(noz_c.y)) {
+        dir.x = Sign(noz_c.x);
+        dir.y = 0;
+    }
+    else {
+        dir.x = 0;
+        dir.y = Sign(noz_c.y);
+    }
+
+    DrawLine(batch, center, center + dir, z, V4(1, 1, 0, 1));
 }
 
 function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_Buffer *rbuffer) {
@@ -690,6 +1051,12 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
 
     f32 dt = input->delta_time;
 
+    play->level_timer -= dt;
+    if (play->level_timer < 0) {
+        // We done :(
+        //
+    }
+
     play->batch = batch;
 
     v4 floor_c = V4(SQUARE(7/255.0f), SQUARE(24/255.0f), SQUARE(22/255.0f), 1.0);
@@ -700,8 +1067,6 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
     if (!play->editor.enabled) {
         UpdatePlayer(play, input);
     }
-
-    //play->player.p.y - 2.9
 
     play->shake -= input->delta_time;
     play->shake  = Max(play->shake, 0);
@@ -715,18 +1080,53 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
     v3 y_axis = GetColumn(zrot, 1);
     v3 z_axis = GetColumn(zrot, 2);
 
-    v2 target_p =  play->player.p; // - V2(0, 2.9);
+    v2 camera_p = play->camera_p;
+    camera_p += shake_offset;
+
+    if (play->active) { UpdateDebugCamera(play, input, batch); }
+    else if (!play->editor.enabled) {
+        SetCameraTransform(batch, 0, x_axis, y_axis, z_axis, V3(camera_p, 24));
+    }
+    else {
+        SimEditor(play, input);
+    }
+
+
+    if (play->editor.enabled) {}
+
+    rect3 camera_b = GetCameraFrustum(&batch->game_tx, 26);
+    rect2 screen_bounds;
+    screen_bounds.min = camera_b.min.xy;
+    screen_bounds.max = camera_b.max.xy;
+
+    v2 screen_dim = screen_bounds.max - screen_bounds.min;
+    screen_dim.x = Abs(screen_dim.x);
+    screen_dim.y = Abs(screen_dim.y);
+
+    rect2 camera_r = play->level->camera_r;
+    camera_r.min -= V2(1.2, 1.2);
+    camera_r.max += V2(1.2, 1.2);
+
+    v2 p_min = camera_r.min + 0.5f * screen_dim;
+    v2 p_max = camera_r.max - 0.5f * screen_dim;
+
+    v2 target_p =  play->player.p;
+    target_p.x = Clamp(target_p.x, p_min.x, p_max.x);
+    target_p.y = Clamp(target_p.y, p_min.y, p_max.y);
+
+#if 0
+    if (target_p.x < camera_r.min.x) { target_p.x = camera_r.min.x; }
+    if (target_p.y < camera_r.min.y) { target_p.y = camera_r.min.y; }
+
+    if (target_p.x > camera_r.max.x) { target_p.x = camera_r.max.x; }
+    if (target_p.y > camera_r.max.y) { target_p.y = camera_r.max.y; }
+#endif
 
     v2 ddp = CAMERA_STIFFNESS * (target_p - play->camera_p) - CAMERA_DAMPING * play->camera_dp;
     play->camera_p  += (0.5f * ddp * dt * dt) + (play->camera_dp * dt);
     play->camera_dp += (ddp * dt);
 
-    v2 camera_p = play->camera_p;
-    camera_p += shake_offset;
-
-    SetCameraTransform(batch, 0, x_axis, y_axis, z_axis, V3(camera_p, 24));
-
-    LevelUpdate(play, &play->level, dt);
+    LevelUpdate(play, play->level, dt);
 
     Draw_Transform game_tx = batch->game_tx;
 
@@ -735,11 +1135,6 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
     }
 
     if (JustPressed(input->keys[Key_F5])) { play->editor.enabled = !play->editor.enabled; }
-
-    if (play->active) { UpdateDebugCamera(play, input, batch); }
-    if (play->editor.enabled) {
-        SimEditor(play, input);
-    }
 
 #if 0
     v3 world_mouse = Unproject(&batch->game_tx, input->mouse_clip);
@@ -752,10 +1147,12 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
     b32 hit = false;
 #endif
 
+#if 0
     for (f32 i = -0.5; i > -100; i -= 5) {
         f32 x = Max(0.09 * Abs(i), 1);
         DrawQuad(batch, { 0 }, V3(0.0, 0.0, i), V2(0.8, 0.8), 0, V4(1/x, 0, 1/x, 1));
     }
+#endif
 
     //DrawQuad(batch, { 0 }, V2(0, 7.5), V2(25, 5));
 
@@ -764,6 +1161,7 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
     //
     // 0.0004 0.0055 0.0046
 
+#if 0
     vert3 q[4];
     q[0].p  = V3(-12.5f, 5.0, -2.0);
     q[0].uv = V2(0, 0);
@@ -782,10 +1180,9 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
     q[3].c  = ABGRPack(floor_c);
 
     DrawQuad(batch, { 0 }, q[0], q[1], q[2], q[3]);
+#endif
 
     //DrawQuad(batch, { 0 }, V2(0, 7.5), V2(25, 5), 0, );
-
-    Random rnd = RandomSeed(32903290);
 
 #if 0
     f32 x = -12.5f;
@@ -838,21 +1235,36 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
         }
     }
 
-    b32 drawn_player = false;
-
-    Level *level = &play->level;
-    for (s32 i = level->back_layer; i > 0; --i) {
+    // Draw level
+    //
+    Level *level = play->level;
+    for (s32 i = level->back_layer; i >= 0; --i) {
         Layer *layer = &level->layers[i];
 
-        for (u32 j = 0; j < layer->num_objects; ++j) {
+        if (layer->z_value == -2) {
+            DrawAnimation(batch, &player->animations[player->slot], V3(player->p + offset, -2.0),
+                    V2(facing, 1) * player->animation_scale, angle);
+        }
+
+        for (u32 j = 0; j < MAX_LAYER_OBJECTS; ++j) {
             Env_Object *obj = &layer->objects[j];
+            if (!obj->valid) { continue; }
 
-            v4 c = V4(1, 1, 1, 1);
-            if (obj->flags & EnvObjectFlag_Foreground) {
-                c = V4(0, 0, 0, 1);
+            if (obj->flags & EnvObjectFlag_Terrain) {
+                DrawTerrain(play, batch, obj, layer->z_value);
             }
+            else if (obj->flags & EnvObjectFlag_Animated) {
+                DrawAnimation(batch, &obj->animation, V3(obj->p, layer->z_value), V2(obj->scale.x, obj->scale.x));
+            }
+            else {
+                v4 c = V4(1, 1, 1, 1);
+                if (obj->flags & EnvObjectFlag_Foreground) {
+                    c = V4(0, 0, 0, 1);
+                }
 
-            DrawQuad(batch, obj->image, V3(obj->p, layer->z_value), obj->scale, 0, c);
+                Image_Handle image = GetObjectImage(play, obj->type);
+                DrawQuad(batch, image, V3(obj->p, layer->z_value), obj->scale.x, 0, c);
+            }
         }
 
         for (u32 j = 0; j < MAX_LAYER_DUST; ++j) {
@@ -863,7 +1275,7 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
 
         }
 
-        if (layer->z_value < -2) {
+        if (layer->z_value < -2 && !play->editor.enabled) {
             // Fullscreen quad for fog effect, this is dumb as it messes with the background colour
             // should've done it in shader but that would require base changes and thats annoying
             //
@@ -872,58 +1284,42 @@ function void LudumModePlayUpdateRender(Mode_Play *play, Input *input, Renderer_
             v3 center = 0.5f * (camera_bounds.max + camera_bounds.min);
             v2 dim    = camera_bounds.max.xy - camera_bounds.min.xy;
 
-
             floor_c.a = 0.4f;
             DrawQuad(batch, { 0 }, center, dim, 0, floor_c);
         }
     }
 
+    //SetCameraTransform(batch, 0, V3(1, 0, 0), V3(0, 1, 0), V3(0, 0, 1), V3(0, 0, 8));
+
 #if 0
-    for (u32 i = 0; i < play->num_env_objects; ++i) {
-        Env_Object *obj = &play->env[i];
+    play->movement_trail[play->next_move] = player->p;
+    play->next_move += 1;
 
-                if (obj->layer > last_layer && obj->layer < -4) {
-                    last_layer = obj->layer;
-        }
-
-        // @Hack: to draw the player in the right place for alpha blending, we really ought to have
-        // sorting directly in the renderer
-        //
-        if (!drawn_player && obj->layer == -2) {
-            DrawAnimation(batch, &player->animations[player->slot], V3(player->p + offset, -2.0),
-                    V2(facing, 1) * player->animation_scale, angle);
-
-            drawn_player = true;
-        }
-
-        Amt_Image *info = GetImageInfo(&state->assets, obj->image);
-        v2 dim = obj->scale *  GetScaledImageDim(info);
-
-        if (play->editor.enabled) {
-            DrawQuadOutline(batch, V3(obj->p, obj->layer), dim, 0, V4(1, 0, 0, 1));
-        }
-
-
-        f32 alpha = 1;
-        if (obj->layer < -4) {
-            alpha = 1.0f / cast(f32) Abs(4 + obj->layer);
-        }
-
-         //, 0, V4(1, 1, 1, alpha));
+    if (play->num_moves < ArraySize(play->movement_trail)) {
+        play->num_moves += 1;
     }
-#endif
 
-#if 0
+    if (play->next_move >= ArraySize(play->movement_trail)) { play->next_move = 0; }
     for (u32 i = 0; i < play->num_moves; ++i) {
         DrawQuad(batch, { 0 }, play->movement_trail[i], V2(0.1, 0.1), 0, V4(1, 0, 0, 1));
     }
-#endif
 
-    if (!drawn_player) {
-        v4 c = player->on_ground ? V4(0, 1, 0, 1) : V4(1, 1, 1, 1);
-        DrawAnimation(batch, &player->animations[player->slot], V3(player->p + offset, -2.0),
-                V2(facing, 1) * player->animation_scale, angle, c);
+    f32 y = 5;
+    for (u32 it = 0; it < 5; ++it) {
+        DrawAnimation(batch, &player->animations[AnimationSlot_Idle], V3(0, y, -2), V2(1, 1));
+        y -= 1;
     }
+
+    v2 camera_rect_p   = 0.5f * (play->level.camera_r.max + play->level.camera_r.min);
+    v2 camera_rect_dim = (play->level.camera_r.max - play->level.camera_r.min);
+
+    DrawQuadOutline(batch, V3(camera_rect_p, -2), camera_rect_dim, 0, V4(1, 0, 1, 1));
+
+
+    v2 level_rect_p   = 0.5f * (play->editor.level_rect.max + play->editor.level_rect.min);
+    v2 level_rect_dim = (play->editor.level_rect.max - play->editor.level_rect.min);
+    DrawQuadOutline(batch, V3(level_rect_p, -2), level_rect_dim, 0, V4(1, 1, 0, 1));
+#endif
 
 
     //DrawQuadOutline(batch, player->p - V2(0, 0.70f), player->dim, 0, player->on_ground ? V4(0, 1, 0, 1) : V4(0, 1, 1, 1));
@@ -961,11 +1357,6 @@ function void SortEnvObjects(Mode_Play *play) {
 }
 #endif
 
-#define FRONT_LAYER  4
-#define BACK_LAYER  -10
-
-#define NUM_PLATFORM_TYPES 6
-
 function void SimEditor(Mode_Play *play, Input *input) {
     Game_State *state = play->state;
     Draw_Batch *batch = play->batch;
@@ -973,88 +1364,107 @@ function void SimEditor(Mode_Play *play, Input *input) {
     Editor *editor = &play->editor;
     Level  *level  = editor->level;
 
+    editor->zoom -= (0.5 * input->mouse_delta.z);
+
+    SetCameraTransform(batch, 0, V3(1, 0, 0), V3(0, 1, 0), V3(0, 0, 1), V3(editor->camera_p, editor->zoom));
+
     u32 layer_index = (FRONT_LAYER - editor->layer) >> 1;
     Layer *layer = &level->layers[layer_index];
 
     layer->z_value = editor->layer;
 
-    v3 mouse_world = Unproject(&batch->game_tx, input->mouse_clip);
-    Image_Handle env_images[] = {
-        GetImageByName(&state->assets, "platform_01"),
-        GetImageByName(&state->assets, "platform_02"),
-        GetImageByName(&state->assets, "platform_03"),
-        GetImageByName(&state->assets, "platform_04"),
-        GetImageByName(&state->assets, "platform_05"),
-        GetImageByName(&state->assets, "platform_06"),
+    v3 mouse_clip;
+    mouse_clip.xy = input->mouse_clip;
+    mouse_clip.z  = editor->zoom - editor->layer;
 
-        GetImageByName(&state->assets, "foreground_01"),
-        GetImageByName(&state->assets, "foreground_02"),
-        GetImageByName(&state->assets, "foreground_03"),
-        GetImageByName(&state->assets, "foreground_04"),
-        GetImageByName(&state->assets, "foreground_05"),
-        GetImageByName(&state->assets, "foreground_06"),
-        GetImageByName(&state->assets, "foreground_07"),
-        GetImageByName(&state->assets, "foreground_08"),
-        GetImageByName(&state->assets, "foreground_09"),
-        GetImageByName(&state->assets, "foreground_10"),
-        GetImageByName(&state->assets, "foreground_11"),
-
-        GetImageByName(&state->assets, "bush_blue"),
-        GetImageByName(&state->assets, "bush_blue_blurred"),
-        GetImageByName(&state->assets, "bush_green"),
-        GetImageByName(&state->assets, "bush_green_blurred"),
-        GetImageByName(&state->assets, "bush_red"),
-        GetImageByName(&state->assets, "bush_red_blurred"),
-        GetImageByName(&state->assets, "bush_small_blue"),
-        GetImageByName(&state->assets, "bush_small_blue_blurred"),
-        GetImageByName(&state->assets, "bush_small_green"),
-        GetImageByName(&state->assets, "bush_small_green_blurred"),
-        GetImageByName(&state->assets, "bush_small_red"),
-        GetImageByName(&state->assets, "bush_small_red_blurred"),
-        GetImageByName(&state->assets, "mask_bush"),
-        GetImageByName(&state->assets, "mask"),
-        GetImageByName(&state->assets, "mask_blurred"),
-        GetImageByName(&state->assets, "gourd"),
-        GetImageByName(&state->assets, "gourd_blurred"),
-        GetImageByName(&state->assets, "gourd_bush"),
-        GetImageByName(&state->assets, "bg_tree"),
-
-        GetImageByName(&state->assets, "large_rock"),
-        GetImageByName(&state->assets, "small_rock"),
-        GetImageByName(&state->assets, "shiitake"),
-        GetImageByName(&state->assets, "shiitake-blurred"),
-    };
+    v3 mouse_world = Unproject(&batch->game_tx, mouse_clip);
 
     if (JustPressed(input->keys[Key_LBracket])) {
         editor->type -= 1;
-        if (editor->type < 0) { editor->type = ArraySize(env_images) - 1; }
+        if (editor->type < 0) { editor->type = KizObject_count - 1; }
     }
 
     if (JustPressed(input->keys[Key_RBracket])) {
         editor->type += 1;
-        if (editor->type >= ArraySize(env_images)) { editor->type = 0; }
+        if (editor->type >= KizObject_count) { editor->type = 0; }
     }
 
     if (JustPressed(input->keys[Key_Up]))   {
-        editor->layer -= 2;
-        if (editor->layer < BACK_LAYER) {
-            editor->layer = BACK_LAYER;
+        if (IsPressed(input->keys[Key_Shift])) {
+            editor->sub_layer += 1;
+            if (editor->sub_layer >= MAX_LAYER_OBJECTS) { editor->sub_layer = MAX_LAYER_OBJECTS - 1; }
+
+            printf("sublayer: %d\n", editor->sub_layer);
+        }
+        else {
+            editor->layer -= 2;
+            if (editor->layer < BACK_LAYER) {
+                editor->layer = BACK_LAYER;
+            }
+
+            printf("Info: layer is %d\n", editor->layer);
         }
 
-        printf("Info: layer is %d\n", editor->layer);
+    }
+
+    if (JustPressed(input->keys[Key_R])) {
+        editor->sub_layer = 32;
+    }
+
+    if (JustPressed(input->keys[Key_S])) {
+        WriteKiz(editor->level);
+    }
+
+    if (JustPressed(input->keys[Key_L])) {
+        ReadKiz(WrapConst("levels/level0.kiz"), editor->level, play);
     }
 
     if (JustPressed(input->keys[Key_Down])) {
-        editor->layer += 2;
-        if (editor->layer > FRONT_LAYER) {
-            editor->layer = FRONT_LAYER;
-        }
+        if (IsPressed(input->keys[Key_Shift])) {
+            editor->sub_layer -= 1;
+            if (editor->sub_layer < 0) { editor->sub_layer = 0; }
 
-        printf("Info: layer is %d\n", editor->layer);
+            printf("sublayer: %d\n", editor->sub_layer);
+        }
+        else {
+            editor->layer += 2;
+            if (editor->layer > FRONT_LAYER) {
+                editor->layer = FRONT_LAYER;
+            }
+
+            printf("Info: layer is %d\n", editor->layer);
+        }
     }
 
-    if (JustPressed(input->keys[Key_Left]))  { editor->scale -= 0.25; }
-    if (JustPressed(input->keys[Key_Right])) { editor->scale += 0.25; }
+    if (JustPressed(input->keys[Key_Q])) {
+        editor->mode = EditorMode_Select;
+    }
+    else if (JustPressed(input->keys[Key_W])) {
+        editor->mode = EditorMode_Place;
+    }
+    else if (JustPressed(input->keys[Key_E])) {
+        editor->mode = EditorMode_DrawTerrain;
+    }
+
+    if (JustPressed(input->keys[Key_Left]))  {
+        if (IsPressed(input->keys[Key_Shift])) {
+            editor->scale -= 1.0;
+        }
+        else {
+            editor->scale -= 0.25;
+        }
+
+        editor->scale = Max(editor->scale, 0.25);
+    }
+
+    if (JustPressed(input->keys[Key_Right])) {
+        if (IsPressed(input->keys[Key_Shift])) {
+            editor->scale += 1.0;
+        }
+        else {
+            editor->scale += 0.25;
+        }
+    }
 
     if (IsPressed(input->keys[Key_Ctrl]) && JustPressed(input->keys[Key_Z])) {
         if (layer->num_objects >= 1) {
@@ -1062,29 +1472,196 @@ function void SimEditor(Mode_Play *play, Input *input) {
         }
     }
 
-    if (editor->mode == EditorMode_Place && JustPressed(input->mouse_buttons[0])) {
-        if (layer->num_objects < MAX_LAYER_OBJECTS) {
-            Env_Object *obj = &layer->objects[layer->num_objects];
-            layer->num_objects += 1;
+    if (JustPressed(input->keys[Key_Y])) {
+        v3 mp;
+        mp.xy = input->mouse_clip;
+        mp.z  = editor->zoom + 2;
 
-            obj->image = env_images[editor->type];
-            obj->p     = mouse_world.xy;
-            obj->scale = editor->scale;
+        v3 pp = Unproject(&batch->game_tx, mp);
+        level->player_start_p = pp.xy;
+    }
 
-            if (layer->z_value == FRONT_LAYER) {
-                obj->flags |= EnvObjectFlag_Foreground;
+    if (editor->last_terrain && IsPressed(input->keys[Key_T])) {
+        Env_Object *obj = editor->last_terrain;
+        if (JustPressed(input->keys[Key_1])) {
+            if (obj->sides & EnvTerrainSide_Left) {
+                obj->sides &= ~EnvTerrainSide_Left;
             }
-
-            if (editor->type < NUM_PLATFORM_TYPES) {
-                obj->flags |= EnvObjectFlag_Platform;
+            else {
+                obj->sides |= EnvTerrainSide_Left;
             }
-
-            if (layer_index > level->back_layer) { level->back_layer = layer_index; }
+        }
+        else if (JustPressed(input->keys[Key_2])) {
+            if (obj->sides & EnvTerrainSide_Right) {
+                obj->sides &= ~EnvTerrainSide_Right;
+            }
+            else {
+                obj->sides |= EnvTerrainSide_Right;
+            }
+        }
+        else if (JustPressed(input->keys[Key_3])) {
+            if (obj->sides & EnvTerrainSide_Top) {
+                obj->sides &= ~EnvTerrainSide_Top;
+            }
+            else {
+                obj->sides |= EnvTerrainSide_Top;
+            }
+        }
+        else if (JustPressed(input->keys[Key_4])) {
+            if (obj->sides & EnvTerrainSide_Bottom) {
+                obj->sides &= ~EnvTerrainSide_Bottom;
+            }
+            else {
+                obj->sides |= EnvTerrainSide_Bottom;
+            }
         }
     }
 
-    Amt_Image *info = GetImageInfo(&state->assets, env_images[editor->type]);
-    v2 dim = editor->scale * GetScaledImageDim(info);
+    if (IsPressed(input->keys[Key_Alt]) && IsPressed(input->mouse_buttons[0])) {
+        v2 dc = (0.5f * editor->zoom) * input->mouse_delta.xy;
+        editor->camera_p.x -= dc.x;
+        editor->camera_p.y += dc.y;
+    }
+    else if (JustPressed(input->mouse_buttons[0])) {
+        switch (editor->mode) {
+            case EditorMode_Place: {
+                if (layer->num_objects < MAX_LAYER_OBJECTS) {
+                    Env_Object *obj = &layer->objects[editor->sub_layer];
 
-    DrawQuad(batch, env_images[editor->type], V3(mouse_world.xy, editor->layer), dim, 0, V4(1, 1, 1, 0.6));
+                    editor->sub_layer += 1; // auto increase sublayer
+                    if (editor->sub_layer > MAX_LAYER_OBJECTS - 1) {
+                        printf("Warn: reached sublayer limit, use shift+up and shift+down to choose\n");
+                        editor->sub_layer = MAX_LAYER_OBJECTS - 1;
+                    }
+
+                    printf("sublayer: %d\n", editor->sub_layer);
+
+                    obj->valid   = true;
+
+                    obj->type    = editor->type;
+                    obj->p       = mouse_world.xy;
+                    obj->scale.x = editor->scale;
+
+                    if (layer->z_value == FRONT_LAYER) {
+                        obj->flags |= EnvObjectFlag_Foreground;
+                    }
+
+                    if (editor->type >= KizObject_platform_01 && editor->type <= KizObject_platform_06) {
+                        obj->flags |= EnvObjectFlag_Platform;
+                    }
+
+                    if (editor->type == KizObject_orb || editor->type == KizObject_goal) {
+                        obj->flags |= EnvObjectFlag_Animated;
+
+                        Image_Handle sheet = GetObjectImage(play, editor->type);
+                        switch (editor->type) {
+                            case KizObject_orb: {
+                                Initialise(&obj->animation, sheet, 1, 22, 1.0f / 30.0f);
+                            }
+                            break;
+                            case KizObject_goal: {
+                                Initialise(&obj->animation, sheet, 3, 4, 11, 1.0f / 30.0f);
+                            }
+                            break;
+                        }
+                    }
+
+                    if (layer_index > level->back_layer) { level->back_layer = layer_index; }
+                }
+            }
+            break;
+            case EditorMode_DrawTerrain: {
+                editor->terrain_begin = mouse_world.xy;
+            }
+            break;
+        }
+    }
+
+    if (editor->mode == EditorMode_DrawTerrain && !IsPressed(input->keys[Key_Alt]) &&
+            WasPressed(input->mouse_buttons[0]))
+    {
+        // Add env object to represent the terrain
+        //
+        Env_Object *obj = &layer->objects[editor->sub_layer];
+        editor->sub_layer += 1;
+        if (editor->sub_layer > MAX_LAYER_OBJECTS - 1) {
+            printf("Warn: reached sublayer limit, use shift+up and shift+down to choose\n");
+            editor->sub_layer = MAX_LAYER_OBJECTS - 1;
+        }
+
+        printf("sublayer: %d\n", editor->sub_layer);
+
+        v2 tstart = Minimum(editor->terrain_begin, mouse_world.xy);
+        v2 tend   = Maximum(editor->terrain_begin, mouse_world.xy);
+
+        v2 c   = 0.5f * (tstart + tend);
+        v2 dim = tend - tstart;
+
+        obj->type  = KIZ_TERRAIN_TYPE;
+        obj->p     = c;
+        obj->scale = dim;
+
+        obj->terrain_seed = input->ticks;
+        obj->sides        = EnvTerrainSide_All;
+
+        obj->flags |= EnvObjectFlag_Platform;
+        obj->flags |= EnvObjectFlag_Terrain;
+
+        obj->valid = true;
+
+        v2 min = c - 0.5f * dim;
+        v2 max = c + 0.5f * dim;
+
+        if (min.x < editor->level_rect.min.x) { editor->level_rect.min.x = min.x; }
+        if (min.y < editor->level_rect.min.y) { editor->level_rect.min.y = min.y; }
+
+        if (max.x > editor->level_rect.max.x) { editor->level_rect.max.x = max.x; }
+        if (max.y > editor->level_rect.max.y) { editor->level_rect.max.y = max.y; }
+
+        v2 level_c = 0.5f * (editor->level_rect.max + editor->level_rect.min);
+
+        v2 noz_c = Noz(level_c - c);
+        v2 dir;
+        if (Abs(noz_c.x) > Abs(noz_c.y)) {
+            dir.x = Sign(noz_c.x);
+            dir.y = 0;
+        }
+        else {
+            dir.x = 0;
+            dir.y = Sign(noz_c.y);
+        }
+
+        v2 view_min = c + 0.5f * dim * dir;
+        v2 view_max = view_min; //c + 0.5f * dim;
+
+        if (view_min.x < level->camera_r.min.x) { level->camera_r.min.x = view_min.x; }
+        if (view_min.y < level->camera_r.min.y) { level->camera_r.min.y = view_min.y; }
+
+        if (view_max.x > level->camera_r.max.x) { level->camera_r.max.x = view_max.x; }
+        if (view_max.y > level->camera_r.max.y) { level->camera_r.max.y = view_max.y; }
+
+        if (layer_index > level->back_layer) { level->back_layer = layer_index; }
+
+        editor->last_terrain = obj;
+    }
+
+    if (editor->mode == EditorMode_Place) {
+        Image_Handle image = GetObjectImage(play, editor->type);
+
+        Amt_Image *info = GetImageInfo(&state->assets, image);
+        v2 dim = editor->scale * GetScaledImageDim(info);
+
+        DrawQuad(batch, image, V3(mouse_world.xy, editor->layer), dim, 0, V4(1, 1, 1, 0.6));
+    }
+    else if (editor->mode == EditorMode_DrawTerrain) {
+        if (!IsPressed(input->keys[Key_Alt]) && IsPressed(input->mouse_buttons[0])) {
+            v2 tstart = Minimum(editor->terrain_begin, mouse_world.xy);
+            v2 tend   = Maximum(editor->terrain_begin, mouse_world.xy);
+
+            v2 c   = 0.5f * (tstart + tend);
+            v2 dim = tend - tstart;
+
+            DrawQuad(batch, { 0 }, V3(c, editor->layer), dim, 0, V4(1, 1, 1, 0.6));
+        }
+    }
 }

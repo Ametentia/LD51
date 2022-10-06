@@ -1,7 +1,9 @@
 #include <base.cpp>
 
 #include "ludum_util.cpp"
+#include "ludum_mode_menu.cpp"
 #include "ludum_mode_play.cpp"
+#include "ludum_kiz.cpp"
 
 function void LudumInit(Game_State *state, Texture_Transfer_Queue *texture_queue) {
     Memory_Allocator *alloc = Platform->GetMemoryAllocator();
@@ -10,7 +12,9 @@ function void LudumInit(Game_State *state, Texture_Transfer_Queue *texture_queue
     Initialise(&state->assets, &state->perm, texture_queue);
     Initialise(&state->audio,  &state->perm);
 
-    ModePlay(state);
+    // ModePlay(state);
+
+    ModeMenu(state);
 }
 
 function void LudumUpdateRender(Game_State *state, Input *input, Renderer_Buffer *rbuffer) {
@@ -19,6 +23,10 @@ function void LudumUpdateRender(Game_State *state, Input *input, Renderer_Buffer
     }
 
     switch (state->mode) {
+        case GameMode_Menu: {
+            LudumModeMenuUpdateRender(state->menu, input, rbuffer);
+        }
+        break;
         case GameMode_Play: {
             LudumModePlayUpdateRender(state->play, input, rbuffer);
         }
